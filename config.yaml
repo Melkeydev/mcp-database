@@ -1,0 +1,4 @@
+database:
+  type: "postgres" # mysql, postgres, sqlite
+  connection_string: "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+  file: "database.db" # for sqlite
