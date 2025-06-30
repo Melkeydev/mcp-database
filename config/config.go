@@ -38,7 +38,7 @@ func LoadConfig(configPath string) (*Config, error) {
 
 func (d *DatabaseConfig) GetConnectionString() (string, error) {
 	switch d.DBType {
-	case "postgres, mysql":
+	case "postgres", "mysql":
 		if d.ConnectionString == "" {
 			return "", fmt.Errorf("Connection string is required for %s connection", d.DBType)
 		}

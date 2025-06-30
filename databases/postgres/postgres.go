@@ -1,4 +1,4 @@
-package databases
+package postgres
 
 import (
 	"context"
@@ -9,18 +9,8 @@ import (
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/stdlib"
 	"github.com/jmoiron/sqlx"
+	"github.com/melkeydev/mcp-database/types"
 )
-
-type Column struct {
-	Name     string
-	Type     string
-	Nullable bool
-}
-
-type Table struct {
-	Name    string
-	Columns []Column
-}
 
 type PostgresConnector struct {
 	db *sqlx.DB
@@ -57,7 +47,7 @@ func (c *PostgresConnector) Ping(ctx context.Context) error {
 }
 
 // Discover
-func (c *PostgresConnector) Scan(ctx context.Context, tablesList []string) ([]Table, error) {
+func (c *PostgresConnector) Scan(ctx context.Context, tablesList []string) ([]types.Table, error) {
 	tx, err := c.db.BeginTxx(ctx, &sql.TxOptions{
 		ReadOnly: true,
 	})
@@ -102,7 +92,7 @@ func (c *PostgresConnector) Scan(ctx context.Context, tablesList []string) ([]Ta
 	}
 	defer rows.Close()
 
-	var tables []Table
+	var tables []types.Table
 	for rows.Next() {
 		var tableName, tableSchema string
 		if err := rows.Scan(&tableName, &tableSchema); err != nil {
@@ -115,7 +105,7 @@ func (c *PostgresConnector) Scan(ctx context.Context, tablesList []string) ([]Ta
 		}
 
 		fqtn := fmt.Sprintf(`"%s"."%s"`, tableSchema, tableName)
-		tables = append(tables, Table{
+		tables = append(tables, types.Table{
 			Name:    fqtn,
 			Columns: columns,
 		})
@@ -155,11 +145,22 @@ func (c *PostgresConnector) Query(ctx context.Context, sqlQuery string) ([]map[s
 
 // Sample
 func (c *PostgresConnector) Sample(ctx context.Context, table string, limit int) ([]map[string]any, error) {
-	var test []map[string]any
-	return test, nil
+	if limit <= 0 {
+		limit = 10
+	}
+
+	query := fmt.Sprintf("SELECT * FROM %s LIMIT %d", table, limit)
+	return c.Query(ctx, query)
 }
 
-func (c *PostgresConnector) loadColumns(ctx context.Context, tx *sqlx.Tx, tableName, tableSchema string) ([]Column, error) {
+func (c *PostgresConnector) Close() error {
+	if c.db != nil {
+		return c.db.Close()
+	}
+	return nil
+}
+
+func (c *PostgresConnector) loadColumns(ctx context.Context, tx *sqlx.Tx, tableName, tableSchema string) ([]types.Column, error) {
 	query := `
 		SELECT column_name, data_type, is_nullable
 		FROM information_schema.columns
@@ -173,14 +174,14 @@ func (c *PostgresConnector) loadColumns(ctx context.Context, tx *sqlx.Tx, tableN
 	}
 	defer rows.Close()
 
-	var columns []Column
+	var columns []types.Column
 	for rows.Next() {
 		var name, dataType, isNullable string
 		if err := rows.Scan(&name, &dataType, &isNullable); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
-		columns = append(columns, Column{
+		columns = append(columns, types.Column{
 			Name:     name,
 			Type:     dataType,
 			Nullable: isNullable == "YES",
