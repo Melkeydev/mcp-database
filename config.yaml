@@ -1,4 +1,6 @@
 database:
   type: "postgres" # mysql, postgres, sqlite
-  connection_string: "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+  connection_string: "postgres://postgres:postgres@localhost:5432/mcp_db?sslmode=disable"
   file: "database.db" # for sqlite
+
+# example connection string for mysql: user:password@tcp(localhost:3306)/database
