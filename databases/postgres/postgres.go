@@ -189,3 +189,129 @@ func (c *PostgresConnector) loadColumns(ctx context.Context, tx *sqlx.Tx, tableN
 
 	return columns, nil
 }
+
+// DescribeTable returns detailed information about a specific table
+func (c *PostgresConnector) DescribeTable(ctx context.Context, table string) (*types.TableDescription, error) {
+	tx, err := c.db.BeginTxx(ctx, &sql.TxOptions{
+		ReadOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Commit()
+
+	// Parse table name to extract schema and table
+	parts := strings.Split(table, ".")
+	var tableSchema, tableName string
+	if len(parts) == 2 {
+		tableSchema = strings.Trim(parts[0], `"`)
+		tableName = strings.Trim(parts[1], `"`)
+	} else {
+		tableSchema = "public"
+		tableName = strings.Trim(table, `"`)
+	}
+
+	// Check if table exists
+	var exists bool
+	err = tx.GetContext(ctx, &exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables 
+			WHERE table_schema = $1 AND table_name = $2
+		)`, tableSchema, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check table existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("table %s not found", table)
+	}
+
+	// Get columns
+	columns, err := c.loadColumns(ctx, tx, tableName, tableSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load columns: %w", err)
+	}
+
+	// Get row count
+	var rowCount int64
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"."%s"`, tableSchema, tableName)
+	err = tx.GetContext(ctx, &rowCount, countQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get row count: %w", err)
+	}
+
+	// Get sample data
+	sampleData, err := c.Sample(ctx, table, 5)
+	if err != nil {
+		// Non-critical error, continue without sample data
+		sampleData = nil
+	}
+
+	// Get primary keys
+	rows, err := tx.QueryContext(ctx, `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE i.indisprimary
+		AND n.nspname = $1
+		AND c.relname = $2
+		ORDER BY array_position(i.indkey, a.attnum)`, tableSchema, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary keys: %w", err)
+	}
+	defer rows.Close()
+
+	var primaryKeys []string
+	for rows.Next() {
+		var pkColumn string
+		if err := rows.Scan(&pkColumn); err != nil {
+			return nil, fmt.Errorf("failed to scan primary key: %w", err)
+		}
+		primaryKeys = append(primaryKeys, pkColumn)
+	}
+
+	// Get indexes
+	indexRows, err := tx.QueryContext(ctx, `
+		SELECT 
+			i.relname as index_name,
+			array_agg(a.attname ORDER BY array_position(idx.indkey, a.attnum)) as columns,
+			idx.indisunique as is_unique
+		FROM pg_index idx
+		JOIN pg_class i ON i.oid = idx.indexrelid
+		JOIN pg_class c ON c.oid = idx.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_attribute a ON a.attrelid = idx.indrelid AND a.attnum = ANY(idx.indkey)
+		WHERE n.nspname = $1
+		AND c.relname = $2
+		AND NOT idx.indisprimary
+		GROUP BY i.relname, idx.indisunique`, tableSchema, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get indexes: %w", err)
+	}
+	defer indexRows.Close()
+
+	var indexes []types.Index
+	for indexRows.Next() {
+		var indexName string
+		var columnNames []string
+		var isUnique bool
+		if err := indexRows.Scan(&indexName, &columnNames, &isUnique); err != nil {
+			return nil, fmt.Errorf("failed to scan index: %w", err)
+		}
+		indexes = append(indexes, types.Index{
+			Name:    indexName,
+			Columns: columnNames,
+			Unique:  isUnique,
+		})
+	}
+
+	return &types.TableDescription{
+		Name:        table,
+		Columns:     columns,
+		RowCount:    rowCount,
+		SampleData:  sampleData,
+		PrimaryKeys: primaryKeys,
+		Indexes:     indexes,
+	}, nil
+}

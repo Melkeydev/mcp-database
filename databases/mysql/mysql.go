@@ -186,3 +186,118 @@ func (c *MySQLConnector) loadColumns(ctx context.Context, tx *sqlx.Tx, tableName
 
 	return columns, nil
 }
+
+// DescribeTable returns detailed information about a specific table
+func (c *MySQLConnector) DescribeTable(ctx context.Context, table string) (*types.TableDescription, error) {
+	tx, err := c.db.BeginTxx(ctx, &sql.TxOptions{
+		ReadOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Commit()
+
+	// Check if table exists
+	var exists bool
+	err = tx.GetContext(ctx, &exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables 
+			WHERE table_schema = DATABASE() AND table_name = ?
+		)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check table existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("table %s not found", table)
+	}
+
+	// Get current database name
+	var dbName string
+	err = tx.GetContext(ctx, &dbName, "SELECT DATABASE()")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database name: %w", err)
+	}
+
+	// Get columns
+	columns, err := c.loadColumns(ctx, tx, table, dbName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load columns: %w", err)
+	}
+
+	// Get row count
+	var rowCount int64
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)
+	err = tx.GetContext(ctx, &rowCount, countQuery)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get row count: %w", err)
+	}
+
+	// Get sample data
+	sampleData, err := c.Sample(ctx, table, 5)
+	if err != nil {
+		// Non-critical error, continue without sample data
+		sampleData = nil
+	}
+
+	// Get primary keys
+	rows, err := tx.QueryContext(ctx, `
+		SELECT column_name
+		FROM information_schema.key_column_usage
+		WHERE table_schema = DATABASE()
+		AND table_name = ?
+		AND constraint_name = 'PRIMARY'
+		ORDER BY ordinal_position`, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary keys: %w", err)
+	}
+	defer rows.Close()
+
+	var primaryKeys []string
+	for rows.Next() {
+		var pkColumn string
+		if err := rows.Scan(&pkColumn); err != nil {
+			return nil, fmt.Errorf("failed to scan primary key: %w", err)
+		}
+		primaryKeys = append(primaryKeys, pkColumn)
+	}
+
+	// Get indexes
+	indexRows, err := tx.QueryContext(ctx, `
+		SELECT 
+			index_name,
+			GROUP_CONCAT(column_name ORDER BY seq_in_index) as columns,
+			NOT non_unique as is_unique
+		FROM information_schema.statistics
+		WHERE table_schema = DATABASE()
+		AND table_name = ?
+		AND index_name != 'PRIMARY'
+		GROUP BY index_name, non_unique`, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get indexes: %w", err)
+	}
+	defer indexRows.Close()
+
+	var indexes []types.Index
+	for indexRows.Next() {
+		var indexName string
+		var columnNamesStr string
+		var isUnique bool
+		if err := indexRows.Scan(&indexName, &columnNamesStr, &isUnique); err != nil {
+			return nil, fmt.Errorf("failed to scan index: %w", err)
+		}
+		indexes = append(indexes, types.Index{
+			Name:    indexName,
+			Columns: strings.Split(columnNamesStr, ","),
+			Unique:  isUnique,
+		})
+	}
+
+	return &types.TableDescription{
+		Name:        table,
+		Columns:     columns,
+		RowCount:    rowCount,
+		SampleData:  sampleData,
+		PrimaryKeys: primaryKeys,
+		Indexes:     indexes,
+	}, nil
+}

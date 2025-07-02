@@ -15,8 +15,8 @@ type DatabaseConnector interface {
 	Scan(ctx context.Context, tableList []string) ([]types.Table, error)
 	Query(ctx context.Context, sql string) ([]map[string]any, error)
 	Sample(ctx context.Context, table string, limit int) ([]map[string]any, error)
+	DescribeTable(ctx context.Context, table string) (*types.TableDescription, error)
 	Close() error
-	// DescribeTable(ctx context.Context, table string) ([]types.Column, error)
 	// ListTables(ctx context.Context) ([]string, error)
 }
 
