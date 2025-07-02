@@ -41,7 +41,6 @@ func NewPostgresConnector(connectionString string) (*PostgresConnector, error) {
 	return connector, nil
 }
 
-// TODO: continue this
 func (c *PostgresConnector) Ping(ctx context.Context) error {
 	return c.db.PingContext(ctx)
 }
